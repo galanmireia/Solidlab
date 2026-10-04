@@ -18,7 +18,8 @@ Tiene tres modos, que usan **exactamente el mismo código de decisión**:
 Necesitas Python 3.10 o superior.
 
 ```bash
-cd trading-bot
+git clone https://github.com/galanmireia/Solidlab
+cd Solidlab
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
