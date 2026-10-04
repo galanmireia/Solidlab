@@ -11,3 +11,4 @@ logs
 journal
 .env
 config/config.yaml
+build
