@@ -85,6 +85,31 @@ Está bloqueado por **tres seguros** a la vez:
 - [ ] Empiezas con una cantidad pequeña que puedas perder entera.
 - [ ] Sabes cómo cerrar la posición a mano desde la web o la app del exchange.
 
+## En la nube y desde el móvil (Railway + Telegram)
+
+El repositorio incluye `Dockerfile`, `railway.json` y `config/railway.yaml`, preparados para dejar el bot en **paper trading 24/7** en Railway, guardando estado, diario y logs en un volumen montado en `/data`.
+
+**Variables de entorno del servicio:**
+
+| Variable | Valor |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token de tu bot (créalo hablando con [@BotFather](https://t.me/BotFather) → `/newbot`) |
+| `TELEGRAM_CHAT_ID` | Tu chat id. Si no lo sabes, deja esta variable vacía, escribe al bot y te lo dirá |
+
+**Comandos en Telegram** (solo responde a tu chat):
+
+| Comando | Qué hace |
+|---|---|
+| `/estado` | Precio, capital, posición, stop y resultado latente |
+| `/operaciones` | Últimas 5 operaciones cerradas |
+| `/resumen` | Resultado total, aciertos y profit factor |
+| `/pausa` | No abrir operaciones nuevas (la abierta mantiene su stop) |
+| `/reanudar` | Volver a operar |
+
+Además te avisa automáticamente de cada compra, venta, stop, error y parada por riesgo.
+
+> El servidor solo hace paper trading. El modo con dinero real pide confirmación por teclado y no está pensado para ejecutarse en un servidor.
+
 ## Gestión del riesgo
 
 Configurable en `risk:`:
@@ -122,7 +147,7 @@ Son puntos de partida razonables, **no estrategias probadas como rentables**. Pa
 ## Tests
 
 ```bash
-pytest           # 27 tests: riesgo, ejecución, stops, persistencia, seguros del modo real
+pytest           # 31 tests: riesgo, ejecución, stops, persistencia, seguros del modo real
 ruff check src tests
 ```
 
@@ -142,5 +167,8 @@ src/tradebot/
   data.py            descarga de velas y datos sintéticos
   metrics.py         Sharpe, drawdown, profit factor…
   journal.py         diario de operaciones en CSV
+  telegram.py        avisos y control por Telegram
+  commands.py        comandos /estado, /pausa…
   cli.py             línea de comandos
+Dockerfile, railway.json, config/railway.yaml   despliegue en Railway
 ```

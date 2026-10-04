@@ -1,0 +1,35 @@
+# Configuración para el servidor (Railway). Modo PAPER: dinero simulado.
+exchange:
+  id: binance
+  testnet: false   # solo se usan datos públicos de mercado; en paper no hay órdenes reales
+
+market:
+  symbol: BTC/USDT
+  timeframe: 4h
+
+strategy:
+  name: ema_trend
+
+risk:
+  risk_per_trade: 0.01
+  max_position_pct: 0.5
+  max_daily_loss_pct: 0.03
+  max_drawdown_pct: 0.15
+  min_order_notional: 10
+
+costs:
+  fee_rate: 0.001
+  slippage_bps: 5
+
+paper:
+  initial_cash: 10000
+  poll_seconds: 30
+
+live:
+  enabled: false
+
+# /data es el volumen persistente: sobrevive a reinicios y nuevos despliegues.
+data_dir: /data/data
+state_dir: /data/state
+journal_dir: /data/journal
+log_dir: /data/logs
