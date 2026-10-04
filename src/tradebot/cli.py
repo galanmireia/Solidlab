@@ -30,7 +30,7 @@ def setup_logging(cfg: AppConfig, name: str) -> None:
     root = logging.getLogger()
     root.setLevel(cfg.log_level)
     root.handlers.clear()
-    console = logging.StreamHandler()
+    console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     file = RotatingFileHandler(cfg.log_dir / f"{name}.log", maxBytes=5_000_000, backupCount=5)
     file.setFormatter(fmt)
