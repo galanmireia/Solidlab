@@ -223,3 +223,44 @@ def test_validate_detects_bad_candles():
 def test_max_drawdown():
     assert max_drawdown(pd.Series([100, 120, 90, 130])) == pytest.approx(0.25)
     assert max_drawdown(pd.Series(np.linspace(1, 2, 10))) == 0
+
+
+# ---------------------------------------------------------------- portfolio
+def test_config_symbols_and_legacy_symbol():
+    assert AppConfig.model_validate({"market": {"symbol": "ETH/USDT"}}).market.symbols == [
+        "ETH/USDT"
+    ]
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"market": {"symbols": ["BTC/USDT", "BTC/USDT"]}})
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"market": {"symbols": ["BTC/USDT", "BTC/EUR"]}})
+
+
+def test_portfolio_backtest_accounting_and_position_limit():
+    from tradebot.backtest import run_portfolio_backtest, split_in_out_of_sample
+
+    syms = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+    cfg = AppConfig.model_validate({"market": {"symbols": syms}, "risk": {"max_open_positions": 2}})
+    data = {
+        s: synthetic_ohlcv(3000, seed=i, start_price=50.0 * (i + 1)) for i, s in enumerate(syms)
+    }
+    res = run_portfolio_backtest(data, cfg)
+
+    assert len({t.symbol for t in res.trades}) > 1
+    pnl = sum(t.pnl for t in res.trades)
+    assert res.equity.iloc[-1] == pytest.approx(cfg.backtest.initial_cash + pnl, rel=1e-9)
+    assert sum(m["operaciones"] for m in res.per_symbol.values()) == len(res.trades)
+
+    # Nunca hay más de 2 posiciones abiertas a la vez.
+    events = sorted(
+        [(t.entry_time, 1) for t in res.trades] + [(t.exit_time, -1) for t in res.trades],
+        key=lambda e: (e[0], e[1]),  # a la misma hora, primero las salidas
+    )
+    open_now = peak = 0
+    for _, delta in events:
+        open_now += delta
+        peak = max(peak, open_now)
+    assert peak <= 2
+
+    ins, oos = split_in_out_of_sample(data, 0.7)
+    assert all(ins[s].index.max() < oos[s].index.min() for s in syms)

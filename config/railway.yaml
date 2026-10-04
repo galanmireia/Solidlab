@@ -4,7 +4,13 @@ exchange:
   testnet: false   # solo se usan datos públicos de mercado; en paper no hay órdenes reales
 
 market:
-  symbol: BTC/USDT
+  # Monedas vigiladas (todas contra la misma moneda, USDT). Puedes añadir o quitar.
+  symbols:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - BNB/USDT
+    - XRP/USDT
   timeframe: 4h
 
 strategy:
@@ -12,10 +18,11 @@ strategy:
 
 risk:
   risk_per_trade: 0.01
-  max_position_pct: 0.5
+  max_position_pct: 0.3      # ninguna posición supera el 30 % del capital
   max_daily_loss_pct: 0.03
   max_drawdown_pct: 0.15
   min_order_notional: 10
+  max_open_positions: 3      # como mucho 3 monedas compradas a la vez
 
 costs:
   fee_rate: 0.001

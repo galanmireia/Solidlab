@@ -26,29 +26,50 @@ class OrderUncertainError(RuntimeError):
     """No se sabe si la orden se ejecutó. Hay que reconciliar con el exchange."""
 
 
+class SharedBalance:
+    """Saldo de la cuenta del exchange, compartido por los brókers de todas las monedas."""
+
+    def __init__(self, exchange: ccxt.Exchange) -> None:
+        self.exchange = exchange
+        self.data: dict = {}
+
+    def refresh(self) -> None:
+        self.data = self.exchange.fetch_balance()
+
+    def free(self, currency: str) -> float:
+        return float(self.data.get("free", {}).get(currency) or 0.0)
+
+
 class CcxtBroker(Broker):
-    def __init__(self, exchange: ccxt.Exchange, symbol: str, fee_rate: float) -> None:
+    def __init__(
+        self,
+        exchange: ccxt.Exchange,
+        symbol: str,
+        fee_rate: float,
+        balance: SharedBalance | None = None,
+    ) -> None:
         self.exchange = exchange
         self.symbol = symbol
         self.fee_rate = fee_rate
-        exchange.load_markets()
+        if not exchange.markets:
+            exchange.load_markets()
         self.market = exchange.market(symbol)
         self.base_ccy = self.market["base"]
         self.quote_ccy = self.market["quote"]
-        self._balance: dict = {}
+        self.balance = balance or SharedBalance(exchange)
         self.refresh_balance()
 
     # -------------------------------------------------------------- balances
     def refresh_balance(self) -> None:
-        self._balance = self.exchange.fetch_balance()
+        self.balance.refresh()
 
     @property
     def cash(self) -> float:
-        return float(self._balance.get("free", {}).get(self.quote_ccy) or 0.0)
+        return self.balance.free(self.quote_ccy)
 
     @property
     def base_qty(self) -> float:
-        return float(self._balance.get("free", {}).get(self.base_ccy) or 0.0)
+        return self.balance.free(self.base_ccy)
 
     # ---------------------------------------------------------------- orders
     def _prepare_qty(self, qty: float, price: float) -> float:

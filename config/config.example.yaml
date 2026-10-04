@@ -6,7 +6,13 @@ exchange:
   testnet: true        # true = dinero ficticio del exchange. false = DINERO REAL.
 
 market:
-  symbol: BTC/USDT
+  # Monedas vigiladas (todas contra la misma moneda, USDT). Puedes añadir o quitar.
+  symbols:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - BNB/USDT
+    - XRP/USDT
   timeframe: 4h        # velas de 4 horas: menos ruido y menos comisiones que 5m/15m
 
 strategy:
@@ -20,10 +26,11 @@ strategy:
 
 risk:
   risk_per_trade: 0.01       # se pierde como máximo un 1 % del capital si salta el stop
-  max_position_pct: 0.5      # ninguna posición supera el 50 % del capital
+  max_position_pct: 0.3      # ninguna posición supera el 30 % del capital
   max_daily_loss_pct: 0.03   # -3 % en el día -> no abre más operaciones hasta mañana
   max_drawdown_pct: 0.15     # -15 % desde el máximo -> cierra todo y se detiene
   min_order_notional: 10     # USDT
+  max_open_positions: 3      # como mucho 3 monedas compradas a la vez
 
 costs:
   fee_rate: 0.001            # 0.1 % por operación

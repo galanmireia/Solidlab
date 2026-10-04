@@ -12,11 +12,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from tradebot.backtest import run_backtest, split_in_out_of_sample
+from tradebot.backtest import run_portfolio_backtest, split_in_out_of_sample
 from tradebot.config import AppConfig, load_config
 from tradebot.data import load_or_fetch, synthetic_ohlcv
 from tradebot.journal import Journal
 from tradebot.metrics import format_metrics
+from tradebot.portfolio import Portfolio
 from tradebot.risk import RiskManager
 from tradebot.strategies import build_strategy
 from tradebot.trader import Trader
@@ -40,44 +41,65 @@ def setup_logging(cfg: AppConfig, name: str) -> None:
 
 
 def _state_path(cfg: AppConfig, mode: str) -> Path:
-    safe = cfg.market.symbol.replace("/", "-")
-    return cfg.state_dir / f"{mode}_{cfg.exchange.id}_{safe}_{cfg.market.timeframe}.json"
+    return cfg.state_dir / f"{mode}_{cfg.exchange.id}_{cfg.market.timeframe}_portfolio.json"
+
+
+def _coins(cfg: AppConfig) -> str:
+    return ", ".join(s.split("/")[0] for s in cfg.market.symbols)
 
 
 # ------------------------------------------------------------------ backtest
 def cmd_backtest(cfg: AppConfig, args: argparse.Namespace) -> int:
+    symbols = cfg.market.symbols
     if args.synthetic:
         log.warning("Usando datos SINTÉTICOS: sirve para probar el software, no la estrategia")
-        df = synthetic_ohlcv(timeframe=cfg.market.timeframe, seed=args.seed)
+        data = {
+            sym: synthetic_ohlcv(
+                timeframe=cfg.market.timeframe, seed=args.seed + i, start_price=100.0 * (i + 1)
+            )
+            for i, sym in enumerate(symbols)
+        }
     else:
         from tradebot.config import ExchangeConfig
         from tradebot.exchange import make_exchange
 
         # Los datos históricos se leen siempre del exchange real (público, sin claves).
         exchange = make_exchange(ExchangeConfig(id=cfg.exchange.id, testnet=False))
-        df = load_or_fetch(
-            exchange,
-            cfg.market.symbol,
-            cfg.market.timeframe,
-            cfg.backtest.start,
-            cfg.backtest.end,
-            cfg.data_dir,
-            refresh=args.refresh,
-        )
-    log.info("Datos: %d velas de %s a %s", len(df), df.index[0], df.index[-1])
+        data = {}
+        for sym in symbols:
+            data[sym] = load_or_fetch(
+                exchange,
+                sym,
+                cfg.market.timeframe,
+                cfg.backtest.start,
+                cfg.backtest.end,
+                cfg.data_dir,
+                refresh=args.refresh,
+            )
+            log.info("%s: %d velas desde %s", sym, len(data[sym]), data[sym].index[0].date())
 
     journal = Journal(cfg.journal_dir, "backtest") if args.journal else None
-    segments = [("COMPLETO", df)]
+    segments = [("COMPLETO", data)]
     if args.oos:
-        ins, oos = split_in_out_of_sample(df, 1 - args.oos)
+        ins, oos = split_in_out_of_sample(data, 1 - args.oos)
         segments = [("IN-SAMPLE (ajuste)", ins), ("OUT-OF-SAMPLE (validación)", oos)]
 
     for label, segment in segments:
-        result = run_backtest(segment, cfg, journal=journal)
-        print(f"\n=== {cfg.strategy.name} {cfg.market.symbol} {cfg.market.timeframe} — {label} ===")
-        print(f"  Periodo: {segment.index[0]:%Y-%m-%d} → {segment.index[-1]:%Y-%m-%d}")
+        result = run_portfolio_backtest(segment, cfg, journal=journal)
+        idx = result.equity.index
+        print(f"\n=== {cfg.strategy.name} · {_coins(cfg)} · {cfg.market.timeframe} — {label} ===")
+        print(f"  Periodo: {idx[0]:%Y-%m-%d} → {idx[-1]:%Y-%m-%d}")
         print(f"  Parámetros: {result.params}")
+        print(f"  Máx. posiciones simultáneas: {cfg.risk.max_open_positions}")
         print(format_metrics(result.metrics))
+        if len(symbols) > 1:
+            print("  (Buy and hold = comprar todas a partes iguales y no tocar nada)")
+            print("  Por moneda:")
+            for sym, m in result.per_symbol.items():
+                print(
+                    f"    {sym:<12} {m['operaciones']:>4} op.  {m['resultado']:>+12,.2f}  "
+                    f"aciertos {m['aciertos']:.0%}"
+                )
         if result.halted:
             print(f"  ⚠ Cortacircuitos activado: {result.halt_reason}")
         if args.equity_csv:
@@ -89,10 +111,19 @@ def cmd_backtest(cfg: AppConfig, args: argparse.Namespace) -> int:
 
 
 # -------------------------------------------------------------- paper / live
-def _build_trader(cfg: AppConfig, broker, mode: str) -> Trader:
-    strategy = build_strategy(cfg.strategy.name, cfg.strategy.params)
+def _build_portfolio(cfg: AppConfig, brokers: dict, mode: str) -> Portfolio:
     journal = Journal(cfg.journal_dir, mode)
-    return Trader(cfg.market.symbol, strategy, RiskManager(cfg.risk), broker, journal)
+    traders = [
+        Trader(
+            sym,
+            build_strategy(cfg.strategy.name, cfg.strategy.params),
+            RiskManager(cfg.risk),
+            brokers[sym],
+            journal,
+        )
+        for sym in cfg.market.symbols
+    ]
+    return Portfolio(traders, RiskManager(cfg.risk), cfg.risk.max_open_positions)
 
 
 def _run(runner, initial_cash: float | None, max_steps: int | None) -> None:
@@ -105,7 +136,7 @@ def _run(runner, initial_cash: float | None, max_steps: int | None) -> None:
         log.info("Telegram desactivado (no hay TELEGRAM_BOT_TOKEN)")
     else:
         runner.notify = bot.send
-        runner.trader.listeners.append(bot.send)
+        runner.portfolio.add_listener(bot.send)
         bot.start_polling(make_handler(runner, initial_cash))
         if bot.chat_id is None:
             log.warning("Falta TELEGRAM_CHAT_ID: escribe al bot y te dirá cuál es el tuyo")
@@ -119,27 +150,37 @@ def _run(runner, initial_cash: float | None, max_steps: int | None) -> None:
 
 
 def cmd_paper(cfg: AppConfig, args: argparse.Namespace) -> int:
-    from tradebot.brokers.simulated import SimulatedBroker
+    from tradebot.brokers.simulated import PaperAccount, SimulatedBroker
     from tradebot.config import ExchangeConfig
     from tradebot.exchange import make_exchange
     from tradebot.runner import LiveRunner
 
     # Precios reales del mercado (públicos), dinero simulado.
     exchange = make_exchange(ExchangeConfig(id=cfg.exchange.id, testnet=False))
-    broker = SimulatedBroker(
-        cfg.market.symbol, cfg.paper.initial_cash, cfg.costs.fee_rate, cfg.costs.slippage_bps
-    )
-    trader = _build_trader(cfg, broker, "paper")
+    account = PaperAccount(cfg.paper.initial_cash)
+    brokers = {
+        sym: SimulatedBroker(sym, None, cfg.costs.fee_rate, cfg.costs.slippage_bps, account=account)
+        for sym in cfg.market.symbols
+    }
+    portfolio = _build_portfolio(cfg, brokers, "paper")
     runner = LiveRunner(
-        trader, exchange, cfg.market.timeframe, _state_path(cfg, "paper"), cfg.paper.poll_seconds
+        portfolio,
+        exchange,
+        cfg.market.timeframe,
+        _state_path(cfg, "paper"),
+        cfg.paper.poll_seconds,
     )
-    log.info("PAPER TRADING: precios reales, dinero simulado (%.2f)", cfg.paper.initial_cash)
+    log.info(
+        "PAPER TRADING (%s): precios reales, dinero simulado (%.2f)",
+        _coins(cfg),
+        cfg.paper.initial_cash,
+    )
     _run(runner, cfg.paper.initial_cash, args.max_steps)
     return 0
 
 
 def cmd_live(cfg: AppConfig, args: argparse.Namespace) -> int:
-    from tradebot.brokers.ccxt_broker import CcxtBroker
+    from tradebot.brokers.ccxt_broker import CcxtBroker, SharedBalance
     from tradebot.exchange import make_exchange
     from tradebot.runner import LiveRunner
 
@@ -153,20 +194,26 @@ def cmd_live(cfg: AppConfig, args: argparse.Namespace) -> int:
         if problems:
             print("Modo real BLOQUEADO:\n  - " + "\n  - ".join(problems))
             return 2
-        print(f"\n⚠  VAS A OPERAR CON DINERO REAL en {cfg.exchange.id}: {cfg.market.symbol}")
-        typed = input(f"Escribe '{cfg.market.symbol}' para confirmar: ").strip()
-        if typed != cfg.market.symbol:
+        expected = "OPERAR CON DINERO REAL"
+        print(f"\n⚠  VAS A OPERAR CON DINERO REAL en {cfg.exchange.id}: {_coins(cfg)}")
+        typed = input(f"Escribe '{expected}' para confirmar: ").strip()
+        if typed != expected:
             print("Confirmación incorrecta. Cancelado.")
             return 2
 
     exchange = make_exchange(cfg.exchange, authenticated=True)
-    broker = CcxtBroker(exchange, cfg.market.symbol, cfg.costs.fee_rate)
+    exchange.load_markets()
+    balance = SharedBalance(exchange)
+    brokers = {
+        sym: CcxtBroker(exchange, sym, cfg.costs.fee_rate, balance=balance)
+        for sym in cfg.market.symbols
+    }
     mode = "live" if real_money else "testnet"
-    trader = _build_trader(cfg, broker, mode)
+    portfolio = _build_portfolio(cfg, brokers, mode)
     runner = LiveRunner(
-        trader, exchange, cfg.market.timeframe, _state_path(cfg, mode), cfg.live.poll_seconds
+        portfolio, exchange, cfg.market.timeframe, _state_path(cfg, mode), cfg.live.poll_seconds
     )
-    log.info("MODO %s: saldo %s=%.2f", mode.upper(), broker.quote_ccy, broker.cash)
+    log.info("MODO %s: efectivo=%.2f", mode.upper(), portfolio.cash)
     _run(runner, None, args.max_steps)
     return 0
 

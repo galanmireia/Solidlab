@@ -1,6 +1,6 @@
 # tradebot
 
-Bot de trading **spot, solo compras (long-only) y sin apalancamiento**, conectado a más de 100 exchanges de cripto mediante [ccxt](https://github.com/ccxt/ccxt).
+Bot de trading **spot, solo compras (long-only) y sin apalancamiento**, conectado a más de 100 exchanges de cripto mediante [ccxt](https://github.com/ccxt/ccxt). Vigila **varias monedas a la vez** (por defecto BTC, ETH, SOL, BNB y XRP) con un único capital y un único control de riesgo.
 
 Tiene tres modos, que usan **exactamente el mismo código de decisión**:
 
@@ -74,7 +74,7 @@ tradebot -c config/config.yaml live
 Está bloqueado por **tres seguros** a la vez:
 1. `exchange.testnet: false` y `live.enabled: true` en la configuración.
 2. Variable de entorno `TRADEBOT_LIVE_CONFIRM=YES`.
-3. Al arrancar hay que escribir el símbolo (por ejemplo `BTC/USDT`) para confirmar.
+3. Al arrancar hay que escribir `OPERAR CON DINERO REAL` para confirmar.
 
 **Checklist antes de activarlo:**
 - [ ] El backtest es positivo **en el periodo de validación** y supera o se acerca a *buy and hold* con menos drawdown.
@@ -100,9 +100,10 @@ El repositorio incluye `Dockerfile`, `railway.json` y `config/railway.yaml`, pre
 
 | Comando | Qué hace |
 |---|---|
-| `/estado` | Precio, capital, posición, stop y resultado latente |
+| `/estado` | Capital total, posiciones abiertas, stops y resultado latente |
+| `/precios` | Precio actual de cada moneda vigilada |
 | `/operaciones` | Últimas 5 operaciones cerradas |
-| `/resumen` | Resultado total, aciertos y profit factor |
+| `/resumen` | Resultado total y por moneda, aciertos y profit factor |
 | `/pausa` | No abrir operaciones nuevas (la abierta mantiene su stop) |
 | `/reanudar` | Volver a operar |
 
@@ -117,14 +118,15 @@ Configurable en `risk:`:
 | Regla | Por defecto | Qué hace |
 |---|---|---|
 | `risk_per_trade` | 1 % | Calcula el tamaño para que, si salta el stop, pierdas como máximo esto (comisiones incluidas) |
-| `max_position_pct` | 50 % | Ninguna posición supera esta parte del capital |
+| `max_position_pct` | 30 % | Ninguna posición supera esta parte del capital |
+| `max_open_positions` | 3 | Como mucho estas monedas compradas a la vez: las criptos suelen caer juntas |
 | `max_daily_loss_pct` | 3 % | Tras perder esto en el día (UTC), no abre operaciones hasta el día siguiente |
 | `max_drawdown_pct` | 15 % | Si cae esto desde el máximo, **cierra todo y se detiene**. Para reactivarlo hay que borrar el archivo de `state/` tras revisar qué pasó |
 
 La configuración rechaza valores peligrosos: por ejemplo, `risk_per_trade: 1` (el 100 %) da error en lugar de ejecutarse.
 
 **Otras protecciones:**
-- Las órdenes se deciden al **cierre** de la vela y se ejecutan después: no se usan datos del futuro.
+- Las órdenes se deciden al **cierre** de la vela (de todas las monedas a la vez) y se ejecutan después: no se usan datos del futuro.
 - Nunca se opera con la vela que aún no ha cerrado.
 - Si hay un error de red al enviar una orden, **no se reintenta** (podría duplicarse): el bot se detiene y pide revisión manual.
 - Si el saldo del exchange no coincide con lo que el bot cree tener (por ejemplo, porque vendiste a mano), se detiene.
@@ -140,14 +142,15 @@ Son puntos de partida razonables, **no estrategias probadas como rentables**. Pa
 ## Limitaciones conocidas
 
 - **El stop-loss lo vigila el bot, no el exchange.** Si el ordenador se apaga con una posición abierta, no hay stop. Antes de usar dinero real conviene añadir órdenes stop nativas en el exchange o vigilar que el bot esté siempre en marcha.
-- Un solo símbolo por proceso. Para varios, lanza varios procesos con configuraciones y `state_dir` distintos.
+- Todas las monedas deben cotizar contra la misma moneda (por ejemplo, USDT).
+- Las monedas están muy correlacionadas: diversificar entre criptos reduce menos el riesgo de lo que parece.
 - Solo spot y solo compras: no hay cortos ni futuros (es intencionado).
 - El backtest supone que las órdenes se ejecutan a la apertura de la siguiente vela con el deslizamiento configurado. En mercados con poca liquidez la realidad será peor.
 
 ## Tests
 
 ```bash
-pytest           # 31 tests: riesgo, ejecución, stops, persistencia, seguros del modo real
+pytest           # 36 tests: riesgo, ejecución, stops, persistencia, seguros del modo real
 ruff check src tests
 ```
 
@@ -158,7 +161,8 @@ src/tradebot/
   config.py          configuración validada
   strategies/        estrategias (solo deciden qué hacer)
   risk.py            tamaño de posición y cortacircuitos
-  trader.py          núcleo común: señales → órdenes → posiciones
+  trader.py          núcleo común por moneda: señales → órdenes → posiciones
+  portfolio.py       varias monedas con capital y riesgo compartidos
   brokers/
     simulated.py     ejecución simulada (backtest y paper)
     ccxt_broker.py   ejecución real o testnet vía ccxt

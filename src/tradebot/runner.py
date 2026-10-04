@@ -1,10 +1,10 @@
-"""Bucle en tiempo real para paper trading y modo real.
+"""Bucle en tiempo real para paper trading y modo real, con una o varias monedas.
 
 En cada iteración (cada ``poll_seconds``):
-1. Lee el precio actual y comprueba el stop-loss.
-2. Si ha cerrado una vela nueva, la estrategia decide y la orden se ejecuta al momento.
-3. Actualiza los cortacircuitos de riesgo y guarda el estado en disco (escritura atómica),
-   para que un reinicio o un corte de luz no haga perder la posición ni el stop.
+1. Lee el precio actual de cada moneda y comprueba su stop-loss.
+2. Para cada moneda cuya vela haya cerrado, la estrategia decide y la orden se ejecuta.
+3. Actualiza los cortacircuitos de riesgo (sobre el capital total) y guarda el estado
+   en disco con escritura atómica, para sobrevivir a reinicios y cortes.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ import pandas as pd
 
 from tradebot.brokers.ccxt_broker import CcxtBroker, OrderUncertainError
 from tradebot.brokers.simulated import SimulatedBroker
-from tradebot.data import drop_unclosed, ohlcv_to_frame
-from tradebot.trader import Trader
+from tradebot.data import drop_unclosed, ohlcv_to_frame, timeframe_to_timedelta
+from tradebot.portfolio import Portfolio
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def _utcnow() -> pd.Timestamp:
 class LiveRunner:
     def __init__(
         self,
-        trader: Trader,
+        portfolio: Portfolio,
         data_exchange: ccxt.Exchange,
         timeframe: str,
         state_path: Path,
@@ -45,32 +45,41 @@ class LiveRunner:
         sleep: Callable[[float], None] = time.sleep,
         notify: Callable[[str], None] | None = None,
     ) -> None:
-        self.trader = trader
+        self.portfolio = portfolio
         self.exchange = data_exchange
-        self.symbol = trader.symbol
         self.timeframe = timeframe
+        self.tf = timeframe_to_timedelta(timeframe)
         self.state_path = state_path
         self.poll_seconds = poll_seconds
         self.clock = clock
         self.sleep = sleep
-        self.last_bar_ts: pd.Timestamp | None = None
-        self.history = trader.strategy.warmup + 50
         self.notify = notify or (lambda text: None)
         self.lock = threading.Lock()  # step() y los comandos de Telegram no se pisan
-        self.last_price: float | None = None
-        self.started_at = clock()
-        self.mode = "paper" if isinstance(trader.broker, SimulatedBroker) else "real/testnet"
+        self.last_bar_ts: dict[str, pd.Timestamp] = {}
+        self.history = max(t.strategy.warmup for t in portfolio.traders.values()) + 50
+        first = next(iter(portfolio.traders.values()))
+        self.mode = "paper" if isinstance(first.broker, SimulatedBroker) else "real/testnet"
+
+    @property
+    def symbols(self) -> list[str]:
+        return self.portfolio.symbols
+
+    @property
+    def last_prices(self) -> dict[str, float]:
+        return self.portfolio.prices
 
     # ----------------------------------------------------------------- state
     def save_state(self) -> None:
         state = {
-            "symbol": self.symbol,
+            "version": 2,
+            "symbols": self.symbols,
             "timeframe": self.timeframe,
-            "last_bar_ts": self.last_bar_ts.isoformat() if self.last_bar_ts is not None else None,
-            "trader": self.trader.to_dict(),
+            "last_bar_ts": {s: ts.isoformat() for s, ts in self.last_bar_ts.items()},
+            "portfolio": self.portfolio.to_dict(),
         }
-        if isinstance(self.trader.broker, SimulatedBroker):
-            state["paper_broker"] = self.trader.broker.to_dict()
+        first = next(iter(self.portfolio.traders.values()))
+        if isinstance(first.broker, SimulatedBroker):
+            state["paper_account"] = first.broker.account.to_dict()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.state_path.parent, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -81,69 +90,78 @@ class LiveRunner:
         if not self.state_path.exists():
             return False
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        if state["symbol"] != self.symbol or state["timeframe"] != self.timeframe:
+        if state.get("version") != 2 or state["timeframe"] != self.timeframe:
             raise RuntimeError(
-                f"El estado guardado es de {state['symbol']} {state['timeframe']}; "
-                f"usa otro state_dir o bórralo conscientemente"
+                f"El estado guardado en {self.state_path} no es compatible "
+                f"(versión/timeframe distintos); usa otro state_dir o bórralo conscientemente"
             )
-        self.trader.load_dict(state["trader"])
-        if "paper_broker" in state and isinstance(self.trader.broker, SimulatedBroker):
-            self.trader.broker.load_dict(state["paper_broker"])
-        if state["last_bar_ts"]:
-            self.last_bar_ts = pd.Timestamp(state["last_bar_ts"])
-        log.info("Estado restaurado: posición=%s", self.trader.position)
+        self.portfolio.load_dict(state["portfolio"])
+        first = next(iter(self.portfolio.traders.values()))
+        if "paper_account" in state and isinstance(first.broker, SimulatedBroker):
+            first.broker.account.load_dict(state["paper_account"])
+        self.last_bar_ts = {
+            s: pd.Timestamp(ts) for s, ts in state["last_bar_ts"].items() if s in self.symbols
+        }
+        added = [s for s in self.symbols if s not in state["symbols"]]
+        if added:
+            log.info("Monedas nuevas desde el último arranque: %s", added)
+        log.info(
+            "Estado restaurado: posiciones=%s",
+            {s: t.position.qty for s, t in self.portfolio.traders.items() if t.position},
+        )
         return True
 
     # ------------------------------------------------------------ market data
-    def fetch_closed_bars(self) -> pd.DataFrame:
-        rows = self.exchange.fetch_ohlcv(self.symbol, self.timeframe, limit=self.history)
+    def fetch_closed_bars(self, symbol: str) -> pd.DataFrame:
+        rows = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=self.history)
         return drop_unclosed(ohlcv_to_frame(rows), self.timeframe, self.clock())
 
-    def fetch_price(self) -> float:
-        ticker = self.exchange.fetch_ticker(self.symbol)
+    def fetch_price(self, symbol: str) -> float:
+        ticker = self.exchange.fetch_ticker(symbol)
         price = ticker.get("last") or ticker.get("close")
         if not price or price <= 0:
-            raise ccxt.ExchangeError(f"Precio inválido en ticker: {ticker}")
+            raise ccxt.ExchangeError(f"Precio inválido en ticker de {symbol}: {ticker}")
         return float(price)
 
     # ------------------------------------------------------------- lifecycle
     def bootstrap(self) -> None:
-        restored = self.load_state()
+        self.load_state()
         self.reconcile()
-        if not restored:
-            bars = self.fetch_closed_bars()
-            # No se actúa sobre velas que ya habían cerrado antes de arrancar.
-            self.last_bar_ts = bars.index[-1]
-            log.info(
-                "Arranque limpio; esperando el cierre de la vela posterior a %s", self.last_bar_ts
-            )
+        for sym in self.symbols:
+            if sym not in self.last_bar_ts:
+                # No se actúa sobre velas que ya habían cerrado antes de arrancar.
+                self.last_bar_ts[sym] = self.fetch_closed_bars(sym).index[-1]
+            self.portfolio.mark(sym, self.fetch_price(sym))
+        log.info("Listo; última vela analizada por moneda: %s", self.last_bar_ts)
         self.save_state()
 
     def reconcile(self) -> None:
-        """Comprueba que la posición que cree el bot coincide con el saldo real (solo modo real)."""
-        broker = self.trader.broker
-        if not isinstance(broker, CcxtBroker):
-            return
-        broker.refresh_balance()
-        pos = self.trader.position
-        if pos and broker.base_qty < pos.qty * 0.98:
-            msg = (
-                f"El exchange tiene {broker.base_qty} {broker.base_ccy} pero el bot esperaba "
-                f"{pos.qty}. ¿Venta manual? Se detiene el bot para revisión."
-            )
-            self._halt(msg)
-        elif pos and broker.base_qty > pos.qty * 1.02:
-            log.warning(
-                "Hay más %s en la cuenta del que gestiona el bot; se ignora el exceso",
-                broker.base_ccy,
-            )
+        """Comprueba que las posiciones coinciden con el saldo real (solo modo real)."""
+        for t in self.portfolio.traders.values():
+            broker = t.broker
+            if not isinstance(broker, CcxtBroker):
+                return
+            broker.refresh_balance()
+            pos = t.position
+            if pos and broker.base_qty < pos.qty * 0.98:
+                self._halt(
+                    f"El exchange tiene {broker.base_qty} {broker.base_ccy} pero el bot esperaba "
+                    f"{pos.qty}. ¿Venta manual? Se detiene el bot para revisión."
+                )
+            elif pos and broker.base_qty > pos.qty * 1.02:
+                log.warning("Hay más %s del que gestiona el bot; se ignora", broker.base_ccy)
 
     def _halt(self, reason: str) -> None:
-        state = self.trader.risk.state
+        state = self.portfolio.risk.state
         state.halted = True
         state.halt_reason = reason
         log.critical("BOT DETENIDO: %s", reason)
         self.notify(f"⛔ BOT DETENIDO\n{reason}")
+
+    def _bar_due(self, symbol: str, now: pd.Timestamp) -> bool:
+        """¿Ha cerrado ya la vela siguiente a la última analizada? Evita descargas inútiles."""
+        last = self.last_bar_ts.get(symbol)
+        return last is None or now >= last + 2 * self.tf
 
     def step(self) -> None:
         with self.lock:
@@ -151,32 +169,43 @@ class LiveRunner:
 
     def _step(self) -> None:
         now = self.clock()
-        price = self.fetch_price()
-        self.last_price = price
-        trader = self.trader
-        was_halted = trader.risk.state.halted
+        pf = self.portfolio
+        was_halted = pf.risk.state.halted
 
-        trader.check_stop(price, now)
+        for sym, t in pf.traders.items():
+            price = self.fetch_price(sym)
+            pf.mark(sym, price)
+            t.check_stop(price, now)
 
-        bars = self.fetch_closed_bars()
-        new_bars = bars[bars.index > self.last_bar_ts] if self.last_bar_ts is not None else bars
-        if not new_bars.empty:
+        evaluated = False
+        for sym, t in pf.traders.items():
+            if not self._bar_due(sym, now):
+                continue
+            bars = self.fetch_closed_bars(sym)
+            last = self.last_bar_ts.get(sym)
+            new_bars = bars[bars.index > last] if last is not None else bars
+            if new_bars.empty:
+                continue
             if len(new_bars) > 1:
                 log.warning(
-                    "Se han perdido %d velas (¿bot parado?); solo se evalúa la última",
-                    len(new_bars) - 1,
+                    "%s: se han perdido %d velas; solo se evalúa la última", sym, len(new_bars) - 1
                 )
-            prepared = trader.strategy.prepare(bars)
-            trader.on_bar_close(prepared.iloc[-1])
-            self.last_bar_ts = prepared.index[-1]
-            trader.execute_pending(price, now)
-        else:
-            trader.risk.update(trader.equity(price), now)
+            prepared = t.strategy.prepare(bars)
+            t.on_bar_close(prepared.iloc[-1])
+            self.last_bar_ts[sym] = prepared.index[-1]
+            evaluated = True
 
-        if trader.risk.must_flatten and trader.position:
-            trader.close_position(price, now, "cortacircuitos: drawdown máximo")
-        if trader.risk.state.halted and not was_halted:
-            self.notify(f"⛔ BOT DETENIDO\n{trader.risk.state.halt_reason}")
+        if evaluated:
+            # Las órdenes se ejecutan después de que TODAS las monedas hayan decidido,
+            # igual que en el backtest.
+            for sym, t in pf.traders.items():
+                t.execute_pending(pf.prices[sym], now)
+        pf.risk.update(pf.equity(), now)
+
+        if pf.risk.must_flatten:
+            pf.flatten_all(now, "cortacircuitos: drawdown máximo")
+        if pf.risk.state.halted and not was_halted:
+            self.notify(f"⛔ BOT DETENIDO\n{pf.risk.state.halt_reason}")
 
         self.save_state()
 
@@ -196,10 +225,14 @@ class LiveRunner:
 
     def run(self, max_steps: int | None = None) -> None:
         self._bootstrap_with_retries()
-        log.info("Bot en marcha: %s %s cada %ss", self.symbol, self.timeframe, self.poll_seconds)
+        names = ", ".join(s.split("/")[0] for s in self.symbols)
+        log.info("Bot en marcha: %s %s cada %ss", names, self.timeframe, self.poll_seconds)
+        first = next(iter(self.portfolio.traders.values()))
         self.notify(
-            f"🤖 Bot en marcha ({self.mode})\n{self.symbol} {self.timeframe} · "
-            f"{self.trader.strategy.name}\nEscribe /ayuda para ver los comandos."
+            f"🤖 Bot en marcha ({self.mode})\nVigilando: {names}\n"
+            f"Velas de {self.timeframe} · {first.strategy.name} · "
+            f"máx. {self.portfolio.max_open_positions} posiciones\n"
+            "Escribe /ayuda para ver los comandos."
         )
         steps, wait, errors = 0, self.poll_seconds, 0
         try:
@@ -224,18 +257,16 @@ class LiveRunner:
                         self.notify(f"⚠️ Error inesperado (#{errors}): {exc}")
                 self.sleep(wait)
         except KeyboardInterrupt:
-            log.info("Parada manual. La posición (si hay) sigue abierta y con su stop guardado.")
+            log.info("Parada manual. Las posiciones siguen abiertas y con su stop guardado.")
         finally:
             self.save_state()
 
     def _heartbeat(self) -> None:
-        t = self.trader
-        price = self.fetch_price()
+        pf = self.portfolio
         log.info(
-            "Latido: precio=%.2f capital=%.2f posición=%s operaciones=%d detenido=%s",
-            price,
-            t.equity(price),
-            t.position,
-            len(t.trades),
-            t.risk.state.halted,
+            "Latido: capital=%.2f posiciones=%s operaciones=%d detenido=%s",
+            pf.equity(),
+            [s for s, t in pf.traders.items() if t.position],
+            len(pf.trades()),
+            pf.risk.state.halted,
         )

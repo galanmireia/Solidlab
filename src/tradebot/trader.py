@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -19,6 +20,9 @@ from tradebot.journal import Journal
 from tradebot.models import Action, Fill, Position, Side, Trade
 from tradebot.risk import RiskManager
 from tradebot.strategies.base import Strategy
+
+if TYPE_CHECKING:
+    from tradebot.portfolio import Portfolio
 
 log = logging.getLogger(__name__)
 
@@ -57,11 +61,22 @@ class Trader:
         self.fills: list[Fill] = []
         # Funciones que reciben un texto en cada compra/venta (p. ej. avisos por Telegram).
         self.listeners: list[Callable[[str], None]] = []
+        # Si forma parte de un Portfolio, el riesgo se mide sobre el capital total.
+        self.portfolio: Portfolio | None = None
 
     # ---------------------------------------------------------------- helpers
     def equity(self, mark_price: float) -> float:
+        """Capital total (de todo el portfolio si lo hay) con esta moneda a ``mark_price``."""
+        if self.portfolio is not None:
+            self.portfolio.mark(self.symbol, mark_price)
+            return self.portfolio.equity()
         held = self.position.qty if self.position else 0.0
         return self.broker.cash + held * mark_price
+
+    def _can_open(self, equity: float) -> tuple[bool, str]:
+        if self.portfolio is not None:
+            return self.portfolio.can_open()
+        return self.risk.can_open(equity)
 
     def _emit(self, text: str) -> None:
         for listener in self.listeners:
@@ -104,9 +119,9 @@ class Trader:
             if signal.stop_price is None or signal.stop_price >= close:
                 log.warning("Señal de entrada sin stop válido, ignorada: %s", signal)
                 return
-            allowed, why = self.risk.can_open(eq)
+            allowed, why = self._can_open(eq)
             if not allowed:
-                log.info("%s: entrada bloqueada (%s)", ts, why)
+                log.info("%s %s: entrada bloqueada (%s)", ts, self.symbol, why)
                 return
             self.pending = PendingOrder(Side.BUY, signal.reason, signal.stop_price)
 
@@ -204,18 +219,3 @@ class Trader:
             f"Resultado: {pnl:+,.2f} ({trade.return_pct:+.2%})\nMotivo: {reason}"
         )
         return fill
-
-    # ----------------------------------------------------------- persistence
-    def to_dict(self) -> dict:
-        return {
-            "position": self.position.to_dict() if self.position else None,
-            "pending": self.pending.to_dict() if self.pending else None,
-            "risk": self.risk.state.to_dict(),
-        }
-
-    def load_dict(self, d: dict) -> None:
-        from tradebot.risk import RiskState
-
-        self.position = Position.from_dict(d["position"]) if d.get("position") else None
-        self.pending = PendingOrder.from_dict(d["pending"]) if d.get("pending") else None
-        self.risk.state = RiskState.from_dict(d["risk"])

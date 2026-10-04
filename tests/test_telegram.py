@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from test_runner import FakeExchange, make_runner
+from test_runner import FakeExchange, btc, make_runner
 
 from tradebot.commands import make_handler
 from tradebot.journal import Journal
@@ -44,7 +44,7 @@ def _running(tmp_path, script):
     ex = FakeExchange(start)
     ex.now = start + pd.Timedelta(hours=9)
     runner = make_runner(tmp_path, script, ex)
-    runner.trader.journal = Journal(tmp_path / "journal", "paper")
+    btc(runner).journal = Journal(tmp_path / "journal", "paper")
     runner.bootstrap()
     return runner, ex, start
 
@@ -52,7 +52,7 @@ def _running(tmp_path, script):
 def test_commands_and_notifications(tmp_path):
     runner, ex, start = _running(tmp_path, {0: Signal(Action.ENTER, 90, "in")})
     events: list[str] = []
-    runner.trader.listeners.append(events.append)
+    runner.portfolio.add_listener(events.append)
     handle = make_handler(runner, initial_cash=10_000)
 
     runner.step()
@@ -60,7 +60,8 @@ def test_commands_and_notifications(tmp_path):
     runner.step()
     assert any("COMPRA" in e for e in events)
     status = handle("/estado")
-    assert "Posición" in status and "Stop: 90.00" in status
+    assert "• BTC" in status and "Stop 90 " in status and "Posiciones: 1/3" in status
+    assert "🟢 BTC" in handle("/precios")
 
     ex.price = 89
     runner.step()
@@ -76,9 +77,9 @@ def test_pause_blocks_new_entries(tmp_path):
     assert "pausa" in handle("/pausa").lower()
     ex.now = start + pd.Timedelta(hours=12, minutes=1)
     runner.step()
-    assert runner.trader.position is None
+    assert btc(runner).position is None
     assert "Reanudado" in handle("/reanudar")
-    assert runner.trader.risk.state.paused is False
+    assert runner.portfolio.risk.state.paused is False
 
 
 class FakeResponse:

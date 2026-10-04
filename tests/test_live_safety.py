@@ -20,9 +20,10 @@ class FakeCcxt:
         self.fee_ccy = fee_ccy
         self.fail_create = fail_create
         self.orders = []
+        self.markets = {}
 
     def load_markets(self):
-        pass
+        self.markets = {"BTC/USDT": {}}
 
     def market(self, symbol):
         return {

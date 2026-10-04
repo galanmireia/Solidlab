@@ -24,8 +24,26 @@ class ExchangeConfig(_Strict):
 
 
 class MarketConfig(_Strict):
-    symbol: str = "BTC/USDT"
+    symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"], min_length=1)
     timeframe: str = "4h"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_symbol(cls, data: Any) -> Any:
+        # Compatibilidad: ``symbol: BTC/USDT`` equivale a ``symbols: [BTC/USDT]``.
+        if isinstance(data, dict) and "symbol" in data:
+            data = dict(data)
+            data.setdefault("symbols", [data.pop("symbol")])
+        return data
+
+    @model_validator(mode="after")
+    def _unique_spot_symbols(self) -> MarketConfig:
+        if len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("Hay símbolos repetidos")
+        quotes = {s.split("/")[-1] for s in self.symbols}
+        if len(quotes) != 1:
+            raise ValueError("Todos los símbolos deben cotizar en la misma moneda (p. ej. USDT)")
+        return self
 
 
 class StrategyConfig(_Strict):
@@ -44,6 +62,9 @@ class RiskConfig(_Strict):
     max_drawdown_pct: float = Field(0.15, gt=0, le=0.9)
     # Valor mínimo de una orden en moneda de cotización (evita órdenes "polvo").
     min_order_notional: float = Field(10.0, ge=0)
+    # Con varias monedas: cuántas posiciones puede haber abiertas a la vez.
+    # Las criptos suelen caer juntas, así que conviene no tenerlas todas a la vez.
+    max_open_positions: int = Field(3, ge=1, le=20)
 
 
 class CostsConfig(_Strict):

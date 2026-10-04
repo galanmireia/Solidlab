@@ -12,10 +12,11 @@ from tradebot.runner import LiveRunner
 
 HELP = (
     "Comandos:\n"
-    "/estado – precio, capital, posición y stop\n"
+    "/estado – capital, posiciones abiertas y stops\n"
+    "/precios – precio actual de cada moneda vigilada\n"
     "/operaciones – últimas 5 operaciones cerradas\n"
-    "/resumen – resultado total desde el inicio\n"
-    "/pausa – no abrir operaciones nuevas (la posición abierta sigue con su stop)\n"
+    "/resumen – resultado total y por moneda\n"
+    "/pausa – no abrir operaciones nuevas (las abiertas siguen con su stop)\n"
     "/reanudar – volver a operar\n"
     "/ayuda – esta ayuda"
 )
@@ -28,40 +29,53 @@ def _read_trades(path: Path | None) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
+def _coin(symbol: str) -> str:
+    return symbol.split("/")[0]
+
+
 def make_handler(runner: LiveRunner, initial_cash: float | None = None) -> Callable[[str], str]:
-    trader = runner.trader
-    trades_path = trader.journal.trades_path if trader.journal else None
+    pf = runner.portfolio
+    first = next(iter(pf.traders.values()))
+    trades_path = first.journal.trades_path if first.journal else None
 
     def estado() -> str:
-        price = runner.last_price
-        if price is None:
-            return "Arrancando, todavía no hay precio. Prueba en unos segundos."
-        eq = trader.equity(price)
-        rs = trader.risk.state
-        lines = [
-            f"📊 {trader.symbol} ({runner.mode})",
-            f"Precio: {price:,.2f}",
-            f"Capital: {eq:,.2f}",
-        ]
+        if not pf.prices:
+            return "Arrancando, todavía no hay precios. Prueba en unos segundos."
+        eq = pf.equity()
+        lines = [f"📊 Portfolio ({runner.mode})", f"Capital: {eq:,.2f}"]
         if initial_cash:
             lines.append(f"Desde el inicio: {eq / initial_cash - 1:+.2%}")
-        pos = trader.position
-        if pos:
+        lines.append(f"Efectivo: {pf.cash:,.2f}")
+        open_pos = [(s, t.position) for s, t in pf.traders.items() if t.position]
+        lines.append(f"\nPosiciones: {len(open_pos)}/{pf.max_open_positions}")
+        for sym, pos in open_pos:
+            price = pf.prices.get(sym, pos.entry_price)
             unreal = pos.qty * (price - pos.entry_price) - pos.entry_fee
             lines += [
-                "",
-                f"Posición: {pos.qty:.6f} desde {pos.entry_price:,.2f}",
-                f"Stop: {pos.stop_price:,.2f} ({pos.stop_price / price - 1:+.2%})",
-                f"Latente: {unreal:+,.2f}",
+                f"\n• {_coin(sym)}: {pos.qty:.6g} desde {pos.entry_price:,.4g}",
+                f"  Ahora {price:,.4g} · latente {unreal:+,.2f}",
+                f"  Stop {pos.stop_price:,.4g} ({pos.stop_price / price - 1:+.1%})",
             ]
-        else:
-            lines += ["", "Sin posición: esperando señal."]
+        if not open_pos:
+            lines.append("Sin posiciones: esperando señales.")
+        rs = pf.risk.state
         if rs.halted:
             lines.append(f"\n⛔ DETENIDO: {rs.halt_reason}")
         elif rs.paused:
             lines.append("\n⏸ En pausa (no abre operaciones nuevas)")
-        if runner.last_bar_ts is not None:
-            lines.append(f"\nÚltima vela analizada: {runner.last_bar_ts:%d/%m %H:%M} UTC")
+        if runner.last_bar_ts:
+            last = max(runner.last_bar_ts.values())
+            lines.append(f"\nÚltima vela analizada: {last:%d/%m %H:%M} UTC")
+        return "\n".join(lines)
+
+    def precios() -> str:
+        if not pf.prices:
+            return "Todavía no hay precios."
+        lines = ["💱 Precios:"]
+        for sym in pf.symbols:
+            mark = "🟢" if pf.traders[sym].position else "·"
+            price = pf.prices.get(sym)
+            lines.append(f"{mark} {_coin(sym)}: {price:,.4g}" if price else f"· {_coin(sym)}: —")
         return "\n".join(lines)
 
     def operaciones() -> str:
@@ -73,7 +87,10 @@ def make_handler(runner: LiveRunner, initial_cash: float | None = None) -> Calla
             when = pd.Timestamp(r["exit_time"]).strftime("%d/%m %H:%M")
             pnl = float(r["pnl"])
             icon = "✅" if pnl > 0 else "🔴"
-            out.append(f"{icon} {when}  {pnl:+,.2f} ({r['return_pct']})  {r['exit_reason']}")
+            out.append(
+                f"{icon} {_coin(r['symbol'])} {when}  {pnl:+,.2f} ({r['return_pct']})  "
+                f"{r['exit_reason']}"
+            )
         return "\n".join(out)
 
     def resumen() -> str:
@@ -83,33 +100,41 @@ def make_handler(runner: LiveRunner, initial_cash: float | None = None) -> Calla
         pnls = [float(r["pnl"]) for r in rows]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p <= 0]
-        pf = sum(wins) / -sum(losses) if sum(losses) < 0 else float("inf")
-        return (
-            f"Operaciones: {len(pnls)}\n"
-            f"Resultado neto: {sum(pnls):+,.2f}\n"
-            f"Aciertos: {len(wins) / len(pnls):.0%}\n"
-            f"Profit factor: {pf:.2f}\n"
-            f"Mejor: {max(pnls):+,.2f} · Peor: {min(pnls):+,.2f}"
-        )
+        pf_ratio = sum(wins) / -sum(losses) if sum(losses) < 0 else float("inf")
+        out = [
+            f"Operaciones: {len(pnls)}",
+            f"Resultado neto: {sum(pnls):+,.2f}",
+            f"Aciertos: {len(wins) / len(pnls):.0%}",
+            f"Profit factor: {pf_ratio:.2f}",
+            "",
+            "Por moneda:",
+        ]
+        by_sym: dict[str, list[float]] = {}
+        for r in rows:
+            by_sym.setdefault(r["symbol"], []).append(float(r["pnl"]))
+        for sym, vals in sorted(by_sym.items(), key=lambda kv: -sum(kv[1])):
+            out.append(f"• {_coin(sym)}: {sum(vals):+,.2f} ({len(vals)} op.)")
+        return "\n".join(out)
 
     def pausa() -> str:
-        trader.risk.state.paused = True
+        pf.risk.state.paused = True
         runner.save_state()
-        return "⏸ En pausa. No abrirá operaciones nuevas; si hay posición, mantiene su stop."
+        return "⏸ En pausa. No abrirá operaciones nuevas; las abiertas mantienen su stop."
 
     def reanudar() -> str:
-        trader.risk.state.paused = False
+        pf.risk.state.paused = False
         runner.save_state()
         extra = ""
-        if trader.risk.state.halted:
+        if pf.risk.state.halted:
             extra = (
                 f"\n⚠️ Pero el bot está DETENIDO por el cortacircuitos "
-                f"({trader.risk.state.halt_reason}). Eso requiere revisión manual."
+                f"({pf.risk.state.halt_reason}). Eso requiere revisión manual."
             )
         return "▶️ Reanudado." + extra
 
     commands: dict[str, Callable[[], str]] = {
         "/estado": estado,
+        "/precios": precios,
         "/operaciones": operaciones,
         "/resumen": resumen,
         "/pausa": pausa,
