@@ -79,3 +79,42 @@ def test_pause_blocks_new_entries(tmp_path):
     assert runner.trader.position is None
     assert "Reanudado" in handle("/reanudar")
     assert runner.trader.risk.state.paused is False
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.data
+
+
+class FakeSession:
+    """Imita requests.Session contra la API de Telegram."""
+
+    def __init__(self, bot, updates):
+        self.bot, self.updates, self.posts = bot, updates, []
+
+    def post(self, url, json, timeout):
+        self.posts.append((url.rsplit("/", 1)[-1], json, timeout))
+        if url.endswith("getUpdates"):
+            batch, self.updates = self.updates, []
+            if not batch:
+                self.bot.stop()
+            return FakeResponse({"ok": True, "result": batch})
+        return FakeResponse({"ok": True})
+
+
+def test_polling_end_to_end_with_http_layer():
+    bot = TelegramBot("token", "111")
+    bot.session = FakeSession(bot, [{"update_id": 7, "message": msg(111, "/estado")}])
+    bot._stop.wait = lambda _t: bot._stop.set()  # ante un error, terminar en vez de reintentar
+    bot._poll(lambda t: f"respuesta a {t}")
+    kinds = [(m, p) for m, p, _ in bot.session.posts]
+    assert kinds[0][0] == "getUpdates" and kinds[0][1]["timeout"] == 25
+    assert ("sendMessage", {"chat_id": "111", "text": "respuesta a /estado"}) in kinds
+    assert bot.session.posts[-1][1]["offset"] == 8  # no reprocesa mensajes ya leídos
+    assert bot.session.posts[0][2] > 25  # timeout HTTP mayor que el long-polling

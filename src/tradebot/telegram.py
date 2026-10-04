@@ -37,9 +37,9 @@ class TelegramBot:
             return None
         return TelegramBot(token, os.getenv("TELEGRAM_CHAT_ID", "").strip() or None)
 
-    def _call(self, method: str, timeout: float = 15, **params) -> dict:
+    def _call(self, method: str, params: dict, http_timeout: float = 15) -> dict:
         resp = self.session.post(
-            API.format(token=self.token, method=method), json=params, timeout=timeout
+            API.format(token=self.token, method=method), json=params, timeout=http_timeout
         )
         resp.raise_for_status()
         return resp.json()
@@ -50,7 +50,7 @@ class TelegramBot:
         if not target:
             return
         try:
-            self._call("sendMessage", chat_id=target, text=text[:4000])
+            self._call("sendMessage", {"chat_id": target, "text": text[:4000]})
         except Exception as exc:  # noqa: BLE001
             log.warning("No se pudo enviar a Telegram: %s", exc)
 
@@ -69,7 +69,7 @@ class TelegramBot:
                 params = {"timeout": 25, "allowed_updates": ["message"]}
                 if self._offset is not None:
                     params["offset"] = self._offset
-                updates = self._call("getUpdates", timeout=35, **params).get("result", [])
+                updates = self._call("getUpdates", params, http_timeout=35).get("result", [])
             except Exception as exc:  # noqa: BLE001
                 log.warning("Telegram getUpdates falló: %s", exc)
                 self._stop.wait(10)
