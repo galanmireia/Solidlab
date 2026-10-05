@@ -34,6 +34,8 @@ def _utcnow() -> pd.Timestamp:
 
 
 class LiveRunner:
+    RETRY_EMPTY = pd.Timedelta(minutes=5)
+
     def __init__(
         self,
         portfolio: Portfolio,
@@ -56,6 +58,9 @@ class LiveRunner:
         self.notify = notify or (lambda text: None)
         self.lock = threading.Lock()  # step() y los comandos de Telegram no se pisan
         self.last_bar_ts: dict[str, pd.Timestamp] = {}
+        # Si una vela "debería" haber cerrado pero no llega (bolsa cerrada, fin de semana,
+        # festivo), no se vuelve a preguntar hasta esta hora.
+        self.retry_at: dict[str, pd.Timestamp] = {}
         self.history = max(t.strategy.warmup for t in portfolio.traders.values()) + 50
         first = next(iter(portfolio.traders.values()))
         self.mode = "paper" if isinstance(first.broker, SimulatedBroker) else "real/testnet"
@@ -161,6 +166,8 @@ class LiveRunner:
     def _bar_due(self, symbol: str, now: pd.Timestamp) -> bool:
         """¿Ha cerrado ya la vela siguiente a la última analizada? Evita descargas inútiles."""
         last = self.last_bar_ts.get(symbol)
+        if symbol in self.retry_at and now < self.retry_at[symbol]:
+            return False
         return last is None or now >= last + 2 * self.tf
 
     def step(self) -> None:
@@ -185,7 +192,9 @@ class LiveRunner:
             last = self.last_bar_ts.get(sym)
             new_bars = bars[bars.index > last] if last is not None else bars
             if new_bars.empty:
+                self.retry_at[sym] = now + self.RETRY_EMPTY
                 continue
+            self.retry_at.pop(sym, None)
             if len(new_bars) > 1:
                 log.warning(
                     "%s: se han perdido %d velas; solo se evalúa la última", sym, len(new_bars) - 1

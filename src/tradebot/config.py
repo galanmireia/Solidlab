@@ -40,8 +40,11 @@ class MarketConfig(_Strict):
     def _unique_spot_symbols(self) -> MarketConfig:
         if len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Hay símbolos repetidos")
-        quotes = {s.split("/")[-1] for s in self.symbols}
-        if len(quotes) != 1:
+        # Cripto: "BTC/USDT". Bolsa (Yahoo): "AAPL", "SPY", "SAN.MC"...
+        pairs = [s for s in self.symbols if "/" in s]
+        if pairs and len(pairs) != len(self.symbols):
+            raise ValueError("No mezcles pares cripto (BTC/USDT) y acciones (AAPL) en un portfolio")
+        if len({s.split("/")[-1] for s in pairs}) > 1:
             raise ValueError("Todos los símbolos deben cotizar en la misma moneda (p. ej. USDT)")
         return self
 
@@ -92,6 +95,8 @@ class LiveConfig(_Strict):
 
 
 class AppConfig(_Strict):
+    # Nombre del portfolio en los mensajes (útil con varios: "Cripto", "Bolsa"...).
+    name: str = "Portfolio"
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)

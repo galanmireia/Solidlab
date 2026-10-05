@@ -1,4 +1,5 @@
 # Configuración para el servidor (Railway). Modo PAPER: dinero simulado.
+name: Cripto
 exchange:
   id: binance
   testnet: false   # solo se usan datos públicos de mercado; en paper no hay órdenes reales

@@ -1,0 +1,46 @@
+# Bolsa en el servidor (Railway). Modo PAPER: dinero simulado, datos de Yahoo Finance.
+name: Bolsa
+
+exchange:
+  id: yahoo        # solo datos (acciones y ETFs); no puede enviar órdenes reales
+  testnet: false
+
+market:
+  # Símbolos de Yahoo Finance. Acciones de EE. UU. y ETFs; para la Bolsa de Madrid
+  # se usa el sufijo .MC (p. ej. SAN.MC, ITX.MC), pero no mezcles divisas en un portfolio.
+  symbols:
+    - SPY      # ETF del S&P 500
+    - QQQ      # ETF del Nasdaq 100
+    - AAPL     # Apple
+    - MSFT     # Microsoft
+    - NVDA     # Nvidia
+    - AMZN     # Amazon
+    - GOOGL    # Alphabet (Google)
+  timeframe: 1d    # velas diarias: la bolsa solo abre unas horas al día
+
+strategy:
+  name: ema_trend  # misma estrategia: EMA 20/50 con filtro EMA 200 y stop 3×ATR
+
+risk:
+  risk_per_trade: 0.01
+  max_position_pct: 0.25
+  max_daily_loss_pct: 0.03
+  max_drawdown_pct: 0.15
+  min_order_notional: 10
+  max_open_positions: 4
+
+costs:
+  fee_rate: 0.0005   # 0,05 % por operación (orientativo de un bróker como Interactive Brokers)
+  slippage_bps: 2
+
+paper:
+  initial_cash: 10000
+  poll_seconds: 120  # Yahoo no es un exchange en tiempo real: no hace falta preguntar tan a menudo
+
+live:
+  enabled: false
+
+data_dir: /data/data
+state_dir: /data/state
+journal_dir: /data/journal
+log_dir: /data/logs

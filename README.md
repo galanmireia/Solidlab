@@ -85,9 +85,27 @@ Está bloqueado por **tres seguros** a la vez:
 - [ ] Empiezas con una cantidad pequeña que puedas perder entera.
 - [ ] Sabes cómo cerrar la posición a mano desde la web o la app del exchange.
 
+## Bolsa (acciones y ETFs)
+
+Con `exchange.id: yahoo` el bot usa datos de **Yahoo Finance** (gratis, sin cuenta) para acciones y ETFs: SPY, QQQ, AAPL…, o la Bolsa de Madrid con el sufijo `.MC` (SAN.MC, ITX.MC). Ver `config/railway-stocks.yaml`.
+
+- Solo **backtest y paper trading**: Yahoo da datos, no ejecuta órdenes. Para operar en real haría falta conectar un bróker con API (por ejemplo, Interactive Brokers).
+- Usa velas **diarias** (`1d`) o de 1 hora (`1h`): la bolsa solo abre unas horas al día y no los fines de semana. Fuera de horario, el "precio actual" es el último cierre.
+- Los precios están ajustados por splits y dividendos.
+- No mezcles en un portfolio pares cripto (`BTC/USDT`) con acciones (`AAPL`), ni acciones en divisas distintas (dólares y euros).
+
+**Varios portfolios a la vez:** pasa varias configuraciones y cada una funciona con su propio capital y su propio control de riesgo:
+
+```bash
+tradebot -c config/railway.yaml -c config/railway-stocks.yaml paper
+# o bien: TRADEBOT_CONFIG=config/railway.yaml,config/railway-stocks.yaml tradebot paper
+```
+
+Cada portfolio necesita un `name:` distinto (por ejemplo, "Cripto" y "Bolsa"), que aparece en los mensajes de Telegram.
+
 ## En la nube y desde el móvil (Railway + Telegram)
 
-El repositorio incluye `Dockerfile`, `railway.json` y `config/railway.yaml`, preparados para dejar el bot en **paper trading 24/7** en Railway, guardando estado, diario y logs en un volumen montado en `/data`.
+El repositorio incluye `Dockerfile`, `railway.json`, `config/railway.yaml` (cripto) y `config/railway-stocks.yaml` (bolsa), preparados para dejar ambos portfolios en **paper trading 24/7** en Railway, guardando estado, diario y logs en un volumen montado en `/data`.
 
 **Variables de entorno del servicio:**
 
@@ -150,7 +168,7 @@ Son puntos de partida razonables, **no estrategias probadas como rentables**. Pa
 ## Tests
 
 ```bash
-pytest           # 36 tests: riesgo, ejecución, stops, persistencia, seguros del modo real
+pytest           # 45 tests: riesgo, ejecución, stops, persistencia, seguros del modo real
 ruff check src tests
 ```
 
@@ -163,6 +181,7 @@ src/tradebot/
   risk.py            tamaño de posición y cortacircuitos
   trader.py          núcleo común por moneda: señales → órdenes → posiciones
   portfolio.py       varias monedas con capital y riesgo compartidos
+  stocks.py          datos de bolsa desde Yahoo Finance
   brokers/
     simulated.py     ejecución simulada (backtest y paper)
     ccxt_broker.py   ejecución real o testnet vía ccxt

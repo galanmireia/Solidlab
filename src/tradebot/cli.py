@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -49,7 +50,13 @@ def _coins(cfg: AppConfig) -> str:
 
 
 # ------------------------------------------------------------------ backtest
-def cmd_backtest(cfg: AppConfig, args: argparse.Namespace) -> int:
+def cmd_backtest(cfgs: list[AppConfig], args: argparse.Namespace) -> int:
+    for cfg in cfgs:
+        _backtest_one(cfg, args)
+    return 0
+
+
+def _backtest_one(cfg: AppConfig, args: argparse.Namespace) -> None:
     symbols = cfg.market.symbols
     if args.synthetic:
         log.warning("Usando datos SINTÉTICOS: sirve para probar el software, no la estrategia")
@@ -87,7 +94,10 @@ def cmd_backtest(cfg: AppConfig, args: argparse.Namespace) -> int:
     for label, segment in segments:
         result = run_portfolio_backtest(segment, cfg, journal=journal)
         idx = result.equity.index
-        print(f"\n=== {cfg.strategy.name} · {_coins(cfg)} · {cfg.market.timeframe} — {label} ===")
+        print(
+            f"\n=== {cfg.name} · {cfg.strategy.name} · {_coins(cfg)} · "
+            f"{cfg.market.timeframe} — {label} ==="
+        )
         print(f"  Periodo: {idx[0]:%Y-%m-%d} → {idx[-1]:%Y-%m-%d}")
         print(f"  Parámetros: {result.params}")
         print(f"  Máx. posiciones simultáneas: {cfg.risk.max_open_positions}")
@@ -107,12 +117,11 @@ def cmd_backtest(cfg: AppConfig, args: argparse.Namespace) -> int:
             out = out.with_name(f"{out.stem}_{label.split()[0].lower()}{out.suffix}")
             result.equity.to_csv(out)
             print(f"  Curva de capital guardada en {out}")
-    return 0
 
 
 # -------------------------------------------------------------- paper / live
 def _build_portfolio(cfg: AppConfig, brokers: dict, mode: str) -> Portfolio:
-    journal = Journal(cfg.journal_dir, mode)
+    journal = Journal(cfg.journal_dir, f"{mode}_{cfg.exchange.id}")
     traders = [
         Trader(
             sym,
@@ -126,30 +135,66 @@ def _build_portfolio(cfg: AppConfig, brokers: dict, mode: str) -> Portfolio:
     return Portfolio(traders, RiskManager(cfg.risk), cfg.risk.max_open_positions)
 
 
-def _run(runner, initial_cash: float | None, max_steps: int | None) -> None:
-    """Arranca el bucle, con Telegram si hay TELEGRAM_BOT_TOKEN."""
-    from tradebot.commands import make_handler
+def _run_all(entries: list[tuple[AppConfig, object, float | None]], max_steps: int | None) -> None:
+    """Arranca uno o varios portfolios a la vez, con Telegram si hay TELEGRAM_BOT_TOKEN."""
+    from tradebot.commands import Book, make_handler
     from tradebot.telegram import TelegramBot
 
+    multi = len(entries) > 1
     bot = TelegramBot.from_env()
     if bot is None:
         log.info("Telegram desactivado (no hay TELEGRAM_BOT_TOKEN)")
     else:
-        runner.notify = bot.send
-        runner.portfolio.add_listener(bot.send)
-        bot.start_polling(make_handler(runner, initial_cash))
+        for cfg, runner, _ in entries:
+
+            def send(text: str, _name: str = cfg.name) -> None:
+                bot.send(f"[{_name}] {text}" if multi else text)
+
+            runner.notify = send
+            runner.portfolio.add_listener(send)
+        bot.start_polling(make_handler([Book(c.name, r, cash) for c, r, cash in entries]))
         if bot.chat_id is None:
             log.warning("Falta TELEGRAM_CHAT_ID: escribe al bot y te dirá cuál es el tuyo")
         else:
             log.info("Telegram activado")
+
+    def guarded(cfg: AppConfig, runner) -> None:
+        failures = 0
+        while True:
+            try:
+                runner.run(max_steps=max_steps)
+                return
+            except Exception as exc:  # noqa: BLE001 - que un portfolio caído no tumbe al resto
+                failures += 1
+                log.exception("El portfolio %s se ha detenido", cfg.name)
+                if not multi or max_steps is not None:
+                    raise
+                if failures == 1:
+                    runner.notify(
+                        f"⛔ {cfg.name} no puede funcionar ahora mismo ({exc}). "
+                        "Lo reintento cada 10 minutos; te aviso cuando vuelva."
+                    )
+                runner.sleep(600)
+
     try:
-        runner.run(max_steps=max_steps)
+        if not multi:
+            cfg, runner, _ = entries[0]
+            guarded(cfg, runner)
+        else:
+            threads = [
+                threading.Thread(target=guarded, args=(c, r), name=c.name, daemon=True)
+                for c, r, _ in entries
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
     finally:
         if bot:
             bot.stop()
 
 
-def cmd_paper(cfg: AppConfig, args: argparse.Namespace) -> int:
+def _paper_runner(cfg: AppConfig):
     from tradebot.brokers.simulated import PaperAccount, SimulatedBroker
     from tradebot.config import ExchangeConfig
     from tradebot.exchange import make_exchange
@@ -163,23 +208,32 @@ def cmd_paper(cfg: AppConfig, args: argparse.Namespace) -> int:
         for sym in cfg.market.symbols
     }
     portfolio = _build_portfolio(cfg, brokers, "paper")
-    runner = LiveRunner(
+    log.info(
+        "PAPER TRADING %s (%s): precios reales, dinero simulado (%.2f)",
+        cfg.name,
+        _coins(cfg),
+        cfg.paper.initial_cash,
+    )
+    return LiveRunner(
         portfolio,
         exchange,
         cfg.market.timeframe,
         _state_path(cfg, "paper"),
         cfg.paper.poll_seconds,
     )
-    log.info(
-        "PAPER TRADING (%s): precios reales, dinero simulado (%.2f)",
-        _coins(cfg),
-        cfg.paper.initial_cash,
-    )
-    _run(runner, cfg.paper.initial_cash, args.max_steps)
+
+
+def cmd_paper(cfgs: list[AppConfig], args: argparse.Namespace) -> int:
+    entries = [(cfg, _paper_runner(cfg), cfg.paper.initial_cash) for cfg in cfgs]
+    _run_all(entries, args.max_steps)
     return 0
 
 
-def cmd_live(cfg: AppConfig, args: argparse.Namespace) -> int:
+def cmd_live(cfgs: list[AppConfig], args: argparse.Namespace) -> int:
+    if len(cfgs) != 1:
+        print("El modo live admite una sola configuración a la vez.")
+        return 2
+    cfg = cfgs[0]
     from tradebot.brokers.ccxt_broker import CcxtBroker, SharedBalance
     from tradebot.exchange import make_exchange
     from tradebot.runner import LiveRunner
@@ -214,11 +268,17 @@ def cmd_live(cfg: AppConfig, args: argparse.Namespace) -> int:
         portfolio, exchange, cfg.market.timeframe, _state_path(cfg, mode), cfg.live.poll_seconds
     )
     log.info("MODO %s: efectivo=%.2f", mode.upper(), portfolio.cash)
-    _run(runner, None, args.max_steps)
+    _run_all([(cfg, runner, None)], args.max_steps)
     return 0
 
 
-def cmd_status(cfg: AppConfig, args: argparse.Namespace) -> int:
+def cmd_status(cfgs: list[AppConfig], args: argparse.Namespace) -> int:
+    for cfg in cfgs:
+        _status_one(cfg)
+    return 0
+
+
+def _status_one(cfg: AppConfig) -> None:
     found = False
     for mode in ("paper", "testnet", "live"):
         path = _state_path(cfg, mode)
@@ -227,8 +287,7 @@ def cmd_status(cfg: AppConfig, args: argparse.Namespace) -> int:
             print(f"--- {mode} ({path}) ---")
             print(json.dumps(json.loads(path.read_text(encoding="utf-8")), indent=2))
     if not found:
-        print("No hay estado guardado para esta configuración.")
-    return 0
+        print(f"No hay estado guardado para {cfg.name}.")
 
 
 # ---------------------------------------------------------------------- main
@@ -238,8 +297,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-c",
         "--config",
-        default=os.getenv("TRADEBOT_CONFIG"),
-        help="ruta al YAML de configuración (o variable TRADEBOT_CONFIG)",
+        action="append",
+        help="YAML de configuración; repetible para varios portfolios "
+        "(o TRADEBOT_CONFIG con rutas separadas por comas)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -266,15 +326,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="ver el estado guardado del bot")
 
     args = parser.parse_args(argv)
-    cfg = load_config(args.config)
-    setup_logging(cfg, args.command)
+    paths = args.config or [p for p in os.getenv("TRADEBOT_CONFIG", "").split(",") if p.strip()]
+    cfgs = [load_config(p.strip()) for p in paths] or [load_config(None)]
+    names = [c.name for c in cfgs]
+    if len(set(names)) != len(names):
+        parser.error(f"Los portfolios deben tener nombres distintos (name:): {names}")
+    setup_logging(cfgs[0], args.command)
     handlers = {
         "backtest": cmd_backtest,
         "paper": cmd_paper,
         "live": cmd_live,
         "status": cmd_status,
     }
-    return handlers[args.command](cfg, args)
+    return handlers[args.command](cfgs, args)
 
 
 if __name__ == "__main__":

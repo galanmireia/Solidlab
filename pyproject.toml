@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.5",
     "python-dotenv>=1.0",
     "requests>=2.31",
+    "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]

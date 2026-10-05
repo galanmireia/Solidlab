@@ -12,5 +12,5 @@ RUN pip install .
 COPY config ./config
 
 # El estado, el diario y los logs van a /data (volumen persistente en Railway).
-ENV TRADEBOT_CONFIG=config/railway.yaml
+ENV TRADEBOT_CONFIG=config/railway.yaml,config/railway-stocks.yaml
 CMD ["tradebot", "paper"]
