@@ -51,6 +51,8 @@ def _coins(cfg: AppConfig) -> str:
 
 # ------------------------------------------------------------------ backtest
 def cmd_backtest(cfgs: list[AppConfig], args: argparse.Namespace) -> int:
+    # En un backtest cada compra/venta simulada no interesa en el log: solo el resumen.
+    logging.getLogger("tradebot.trader").setLevel(logging.WARNING)
     for cfg in cfgs:
         _backtest_one(cfg, args)
     return 0

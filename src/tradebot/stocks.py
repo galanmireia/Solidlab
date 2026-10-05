@@ -85,6 +85,12 @@ class YahooMarket:
             )
 
         df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+        # El ajuste por dividendos redondea cada columna por separado y a veces deja el
+        # máximo unas milésimas por debajo del cierre (o el mínimo por encima): se corrige.
+        df = df.assign(
+            High=df[["Open", "High", "Close"]].max(axis=1),
+            Low=df[["Open", "Low", "Close"]].min(axis=1),
+        )
         idx = df.index
         idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
         if since is not None:

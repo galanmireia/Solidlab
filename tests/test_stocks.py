@@ -204,3 +204,14 @@ def test_hourly_history_is_long_enough_for_indicators():
     yf = FakeYF({"SPY": df})
     rows = YahooMarket(yf, clock=lambda: now).fetch_ohlcv("SPY", "1h", limit=251)
     assert len(rows) == 251
+
+
+def test_yahoo_rounding_glitches_are_repaired():
+    df = ny_daily("2024-01-01", "2024-01-31")
+    df.iloc[3, df.columns.get_loc("High")] = df["Close"].iloc[3] - 0.001  # como el bug real
+    df.iloc[5, df.columns.get_loc("Low")] = df["Close"].iloc[5] + 0.001
+    now = pd.Timestamp("2024-02-01", tz="UTC")
+    rows = YahooMarket(FakeYF({"SPY": df}), clock=lambda: now).fetch_ohlcv("SPY", "1d", limit=50)
+    from tradebot.data import validate
+
+    validate(ohlcv_to_frame(rows))  # no lanza
