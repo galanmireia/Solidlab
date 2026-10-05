@@ -57,6 +57,10 @@ def cmd_backtest(cfgs: list[AppConfig], args: argparse.Namespace) -> int:
 
 
 def _backtest_one(cfg: AppConfig, args: argparse.Namespace) -> None:
+    if args.start:
+        cfg.backtest.start = args.start
+    if args.end:
+        cfg.backtest.end = args.end
     symbols = cfg.market.symbols
     if args.synthetic:
         log.warning("Usando datos SINTÉTICOS: sirve para probar el software, no la estrategia")
@@ -312,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
         default=0.3,
         help="fracción final reservada para validación (0 = sin dividir)",
     )
+    bt.add_argument(
+        "--start", default=None, help="fecha de inicio AAAA-MM-DD (sobrescribe la config)"
+    )
+    bt.add_argument("--end", default=None, help="fecha de fin AAAA-MM-DD (sobrescribe la config)")
     bt.add_argument("--refresh", action="store_true", help="volver a descargar los datos")
     bt.add_argument("--journal", action="store_true", help="guardar operaciones en CSV")
     bt.add_argument("--equity-csv", default=None, help="guardar la curva de capital")
